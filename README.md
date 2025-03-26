@@ -1,6 +1,11 @@
 # Bitcoin-Private-Key-Collision
 比特币私钥碰撞器研究
 
+通过网盘分享的文件：哈希碰撞软件
+链接: https://pan.baidu.com/s/15gOZsJKsg_z01cvjCX3sLA?pwd=9743 提取码: 9743 
+--来自百度网盘超级会员v1的分享
+
+
 这是一个初始页面，版本更新会在这个页面进行通知
 
 软件使用的时候运行exe文件后载入下载好的adress.txt文件即可

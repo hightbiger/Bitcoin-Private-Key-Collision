@@ -1,0 +1,206 @@
+if (!window.CryptoJS || !window.elliptic || !window.bech32) {
+            document.getElementById('result').innerHTML = 
+                '<div class="warning-box">关键库加载失败，请检查网络连接或本地资源</div>';
+            throw new Error("核心库加载失败");
+        }
+
+        const ec = new elliptic.ec('secp256k1');
+        let worker = null;
+        let running = false;
+        let counter = 0;
+        let startTime = null;
+        let statsInterval = null;
+
+        document.getElementById('addressFile').addEventListener('change', function(e) {
+            document.getElementById('fileName').textContent = e.target.files[0]?.name || '未选择文件';
+        });
+
+        function generateAddresses(privateKey) {
+            try {
+                const keyPair = ec.keyFromPrivate(privateKey);
+                const pubKey = keyPair.getPublic(true, 'hex');
+                const sha256 = CryptoJS.SHA256(CryptoJS.enc.Hex.parse(pubKey));
+                const hash160 = CryptoJS.RIPEMD160(sha256).toString();
+                
+                return {
+                    legacy: base58Encode('00' + hash160)
+                };
+            } catch (err) {
+                console.error('地址生成失败:', err);
+                return {};
+            }
+        }
+
+        function base58Encode(hex) {
+            const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+            let num = BigInt('0x' + hex);
+            let result = '';
+            while(num > 0n) {
+                result = ALPHABET[Number(num % 58n)] + result;
+                num = num / 58n;
+            }
+            return result;
+        }
+
+        function createWorker() {
+            const workerCode = `
+                ${generateAddresses.toString()}
+                ${base58Encode.toString()}
+                
+                self.onmessage = function(e) {
+                    const targetAddresses = new Set(e.data.addresses);
+                    const BATCH_SIZE = 10; // 每批处理数量
+                    const TARGET_PER_SECOND = 50; // 目标速度
+                    let processed = 0;
+
+                    function processBatch() {
+                        const batchStart = Date.now();
+                        
+                        for(let i = 0; i < BATCH_SIZE; i++) {
+                            const privateKey = new Uint8Array(32);
+                            crypto.getRandomValues(privateKey);
+                            const addrObj = generateAddresses(privateKey);
+                            
+                            if(addrObj.legacy && targetAddresses.has(addrObj.legacy)) {
+                                self.postMessage({
+                                    found: true,
+                                    type: 'legacy',
+                                    address: addrObj.legacy,
+                                    privateKey: Array.from(privateKey)
+                                });
+                                return;
+                            }
+                        }
+                        
+                        processed += BATCH_SIZE;
+                        self.postMessage({ count: BATCH_SIZE });
+                        
+                        // 动态调整延迟保持50个/秒
+                        const elapsed = Date.now() - batchStart;
+                        const targetTime = (BATCH_SIZE / TARGET_PER_SECOND) * 1000;
+                        setTimeout(processBatch, Math.max(targetTime - elapsed, 0));
+                    }
+                    
+                    processBatch();
+                };
+            `;
+
+            return new Worker(URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' })));
+        }
+
+        async function start() {
+            if(running) return;
+            stop();
+            
+            try {
+                const file = document.getElementById('addressFile').files[0];
+                if (!file) throw new Error("请先选择地址文件");
+                
+                const addresses = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(
+                        reader.result.split('\n')
+                            .map(a => a.trim())
+                            .filter(a => a)
+                    );
+                    reader.onerror = () => reject(new Error("文件读取失败"));
+                    reader.readAsText(file);
+                });
+                
+                if (addresses.length === 0) throw new Error("地址文件内容为空");
+                if (addresses.length > 1000000) {
+                    alert('警告：地址数量超过安全限制（最大100万）');
+                    throw new Error("地址数量过多");
+                }
+
+                worker = createWorker();
+                
+                worker.onmessage = (e) => {
+                    if(e.data.found) {
+                        showResult(e.data.privateKey, e.data.address, e.data.type);
+                        stop();
+                    } else {
+                        counter += e.data.count || 0;
+                    }
+                };
+                
+                running = true;
+                startTime = Date.now();
+                counter = 0;
+                statsInterval = setInterval(updateStats, 500);
+                document.getElementById('btnStart').disabled = true;
+                document.getElementById('btnStop').disabled = false;
+                
+                worker.postMessage({
+                    addresses: addresses,
+                    types: ['legacy']
+                });
+
+            } catch (err) {
+                handleError(err);
+            }
+        }
+
+        function stop() {
+            if(worker) {
+                worker.terminate();
+                worker = null;
+            }
+            if(statsInterval) clearInterval(statsInterval);
+            running = false;
+            document.getElementById('btnStart').disabled = false;
+            document.getElementById('btnStop').disabled = true;
+        }
+
+        function updateStats() {
+            if(!running) return;
+            
+            const elapsed = (Date.now() - startTime) / 1000;
+            document.getElementById('speed').textContent = (counter / elapsed).toFixed(1);
+            document.getElementById('counter').textContent = counter.toLocaleString();
+            
+            const hours = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+            const minutes = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+            const seconds = Math.floor(elapsed % 60).toString().padStart(2, '0');
+            document.getElementById('time').textContent = `${hours}:${minutes}:${seconds}`;
+        }
+
+        function showResult(privateKey, address, type) {
+            const typeNames = { legacy: 'Legacy地址' };
+            
+            document.getElementById('result').innerHTML = `
+                <div class="warning-box" style="background:#d4edda; border-color:#c3e6cb; color:#155724">
+                    <h3>🎉 匹配成功！</h3>
+                    <p>类型: ${typeNames[type]}</p>
+                    <p>地址: <code>${address}</code></p>
+                    <p>私钥: <code>${privateKey.map(b => b.toString(16).padStart(2, '0')).join('')}</code></p>
+                    <button onclick="saveResult('${address}', [${privateKey}])" style="margin-top:10px">
+                        <i class="fas fa-save"></i> 保存结果
+                    </button>
+                </div>
+            `;
+        }
+
+        function saveResult(address, privateKey) {
+            const content = `地址: ${address}\n私钥: ${privateKey.join('')}`;
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'found.txt';
+            a.click();
+            
+            URL.revokeObjectURL(url);
+        }
+
+        function handleError(err) {
+            console.error(err);
+            document.getElementById('result').innerHTML = `
+                <div class="warning-box">
+                    <h3>⚠️ 发生错误</h3>
+                    <p>${err.message}</p>
+                </div>
+            `;
+            stop();
+        }
